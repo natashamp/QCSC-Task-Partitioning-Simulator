@@ -126,17 +126,27 @@ The result is a `TensorComputeGraph` backed by NetworkX, where nodes are tasks a
 
 **Module:** `qcsc/parser/cost_analyzer.py`
 
-Before simulation begins, the `CostAnalyzer` inspects the DAG to produce two reports:
+Before any simulation begins, the `CostAnalyzer` examines the DAG to answer two questions: **how expensive is this workflow, and how much of it can run in parallel?** This phase sets expectations — if the critical path is long and parallelism is low, no amount of clever scheduling will dramatically reduce makespan. If affinity cost is skewed toward one device type, that device will be the bottleneck.
 
-- **Cost Report:** Sums up total compute cost across all tasks, broken down by task type (e.g., `QUANTUM_CIRCUIT: 60.0`, `LINEAR_ALGEBRA: 30.0`) and by weighted device affinity load (how much work each device type would handle if tasks were assigned by affinity alone). Also counts the number of classical vs. quantum tasks.
+#### Cost Report
 
-- **Parallelism Report:** Analyzes the DAG structure to determine:
-  - **Critical path length** — the longest chain of dependent tasks from source to sink, which sets the theoretical minimum makespan
-  - **Critical path nodes** — which specific tasks form this bottleneck chain
-  - **Max parallelism width** — the maximum number of tasks that can execute concurrently (the largest antichain in the DAG)
-  - **Parallelism ratio** — total cost divided by critical path length; a ratio of 3.0 means the workflow has roughly 3x the work that can be parallelized vs. the serial bottleneck
+`CostAnalyzer.analyze_cost()` makes a single pass over every node in the graph and computes:
 
-These reports are printed to stdout and provide a pre-simulation understanding of the workflow's structure and potential bottlenecks.
+- **Total compute cost** — the sum of all task costs across the entire workflow (e.g., VQE totals 133.0)
+- **Per-type cost breakdown** — how much work belongs to each task type (e.g., `QUANTUM_CIRCUIT: 60.0`, `LINEAR_ALGEBRA: 30.0`), revealing where the computational weight lives
+- **Classical vs. quantum task count** — a simple split showing the balance of the workflow
+- **Weighted affinity cost per device type** — for each device type, sums `task.compute_cost * task.affinity[device_type]` across all tasks. This estimates the load each device type *would* see if tasks were assigned purely by affinity. For example, a QPU shows high weighted cost because quantum tasks have 0.95 affinity for it, while classical tasks contribute 0.0. This reveals which devices will be under the most pressure before the simulation even runs.
+
+#### Parallelism Report
+
+`CostAnalyzer.analyze_parallelism()` analyzes the DAG structure to determine:
+
+- **Critical path length** — the longest weighted path through the DAG (using `data_size` edge weights). This is the theoretical minimum makespan — even with infinite hardware, you cannot finish faster than this serial chain of dependent tasks.
+- **Critical path nodes** — which specific tasks form that bottleneck chain (e.g., in VQE the critical path spans 14 of 16 tasks, passing through both QPU execution rounds)
+- **Max parallelism width** — the widest "level" of the DAG, computed by assigning each node to a level based on its deepest predecessor, then counting the most populated level. In VQE this is 2 — at best you can run `qpu_execute_1` and `qpu_execute_2` concurrently.
+- **Parallelism ratio** — `total_cost / critical_path_length`. A ratio of 1.0 means the workflow is fully serial. Higher ratios indicate more opportunity for parallel speedup. However, the parallelism width limits how much of that ratio you can actually exploit — a high ratio with a low width means plenty of work exists but the DAG structure constrains concurrency.
+
+Both reports are printed to stdout before simulation begins, giving an upfront understanding of the workflow's structure, cost distribution, and potential bottlenecks.
 
 ### Phase 3: Hardware Cluster Construction
 
