@@ -1,0 +1,126 @@
+workflow:
+  name: "Variational Quantum Eigensolver (VQE)"
+  tasks:
+    # Stage 1: Classical initialization
+    - id: "init_hamiltonian"
+      name: "Initialize Hamiltonian"
+      type: CLASSICAL_DATA_OP
+      cost: 2.0
+      memory: 50
+
+    - id: "init_params"
+      name: "Initialize Variational Parameters"
+      type: CLASSICAL_DATA_OP
+      cost: 1.0
+      memory: 10
+
+    # Stage 2: Quantum circuit preparation
+    - id: "build_ansatz"
+      name: "Build Ansatz Circuit"
+      type: CLASSICAL_DATA_OP
+      cost: 3.0
+      memory: 20
+      depends_on: ["init_params"]
+
+    - id: "compile_circuit"
+      name: "Compile Quantum Circuit"
+      type: CLASSICAL_DATA_OP
+      cost: 5.0
+      memory: 30
+      depends_on: ["build_ansatz", "init_hamiltonian"]
+
+    # Stage 3: Quantum execution (multiple shots)
+    - id: "qpu_execute_1"
+      name: "QPU Execute Batch 1"
+      type: QUANTUM_CIRCUIT
+      cost: 20.0
+      qubits: 12
+      depth: 40
+      memory: 0
+      depends_on: ["compile_circuit"]
+
+    - id: "qpu_execute_2"
+      name: "QPU Execute Batch 2"
+      type: QUANTUM_CIRCUIT
+      cost: 20.0
+      qubits: 12
+      depth: 40
+      memory: 0
+      depends_on: ["compile_circuit"]
+
+    # Stage 4: Classical post-processing
+    - id: "aggregate_results"
+      name: "Aggregate Measurement Results"
+      type: CLASSICAL_DATA_OP
+      cost: 2.0
+      memory: 40
+      depends_on: ["qpu_execute_1", "qpu_execute_2"]
+
+    - id: "compute_expectation"
+      name: "Compute Expectation Value"
+      type: LINEAR_ALGEBRA
+      cost: 8.0
+      memory: 100
+      depends_on: ["aggregate_results"]
+
+    # Stage 5: Parameter optimization
+    - id: "gradient_compute"
+      name: "Compute Parameter Gradients"
+      type: LINEAR_ALGEBRA
+      cost: 10.0
+      memory: 80
+      depends_on: ["compute_expectation"]
+
+    - id: "param_update"
+      name: "Update Variational Parameters"
+      type: PARAMETER_OPT
+      cost: 6.0
+      memory: 20
+      depends_on: ["gradient_compute"]
+
+    # Stage 6: Convergence check and iteration
+    - id: "convergence_check"
+      name: "Check Convergence"
+      type: CLASSICAL_DATA_OP
+      cost: 1.0
+      memory: 10
+      depends_on: ["param_update"]
+
+    # VQE Iteration 2
+    - id: "build_ansatz_v2"
+      name: "Build Ansatz v2"
+      type: CLASSICAL_DATA_OP
+      cost: 3.0
+      memory: 20
+      depends_on: ["convergence_check"]
+
+    - id: "compile_circuit_v2"
+      name: "Compile Circuit v2"
+      type: CLASSICAL_DATA_OP
+      cost: 5.0
+      memory: 30
+      depends_on: ["build_ansatz_v2", "init_hamiltonian"]
+
+    - id: "qpu_execute_v2"
+      name: "QPU Execute v2"
+      type: QUANTUM_CIRCUIT
+      cost: 20.0
+      qubits: 12
+      depth: 40
+      memory: 0
+      depends_on: ["compile_circuit_v2"]
+
+    - id: "measure_final"
+      name: "Final Energy Measurement"
+      type: SAMPLING
+      cost: 15.0
+      qubits: 12
+      memory: 0
+      depends_on: ["qpu_execute_v2"]
+
+    - id: "final_analysis"
+      name: "Final Analysis"
+      type: LINEAR_ALGEBRA
+      cost: 12.0
+      memory: 200
+      depends_on: ["measure_final"]

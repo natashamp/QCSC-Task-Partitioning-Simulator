@@ -1,0 +1,119 @@
+workflow:
+  name: "QAOA for Max-Cut Optimization"
+  tasks:
+    # Problem setup
+    - id: "load_graph"
+      name: "Load Problem Graph"
+      type: CLASSICAL_DATA_OP
+      cost: 2.0
+      memory: 30
+
+    - id: "build_cost_hamiltonian"
+      name: "Build Cost Hamiltonian"
+      type: LINEAR_ALGEBRA
+      cost: 8.0
+      memory: 100
+      depends_on: ["load_graph"]
+
+    - id: "build_mixer"
+      name: "Build Mixer Hamiltonian"
+      type: CLASSICAL_DATA_OP
+      cost: 3.0
+      memory: 50
+      depends_on: ["load_graph"]
+
+    # Initial parameter search with NN
+    - id: "nn_param_predict"
+      name: "NN Parameter Prediction"
+      type: NN_INFERENCE
+      cost: 15.0
+      memory: 500
+      depends_on: ["build_cost_hamiltonian"]
+
+    # QAOA circuit construction
+    - id: "qaoa_circuit_p1"
+      name: "QAOA Circuit p=1"
+      type: CLASSICAL_DATA_OP
+      cost: 4.0
+      memory: 20
+      depends_on: ["build_cost_hamiltonian", "build_mixer", "nn_param_predict"]
+
+    # QPU execution - multiple depths
+    - id: "qpu_qaoa_p1"
+      name: "Execute QAOA p=1"
+      type: COMBINATORIAL_OPT
+      cost: 25.0
+      qubits: 20
+      depth: 10
+      memory: 0
+      depends_on: ["qaoa_circuit_p1"]
+
+    - id: "sample_p1"
+      name: "Sample QAOA p=1"
+      type: SAMPLING
+      cost: 18.0
+      qubits: 20
+      memory: 0
+      depends_on: ["qpu_qaoa_p1"]
+
+    # Classical post-processing
+    - id: "decode_solutions"
+      name: "Decode Bitstring Solutions"
+      type: CLASSICAL_DATA_OP
+      cost: 3.0
+      memory: 40
+      depends_on: ["sample_p1"]
+
+    - id: "evaluate_cuts"
+      name: "Evaluate Cut Values"
+      type: LINEAR_ALGEBRA
+      cost: 6.0
+      memory: 60
+      depends_on: ["decode_solutions", "load_graph"]
+
+    # Parameter optimization
+    - id: "optimize_angles"
+      name: "Optimize QAOA Angles"
+      type: PARAMETER_OPT
+      cost: 12.0
+      memory: 40
+      depends_on: ["evaluate_cuts"]
+
+    # Second round
+    - id: "qaoa_circuit_p2"
+      name: "QAOA Circuit p=2"
+      type: CLASSICAL_DATA_OP
+      cost: 6.0
+      memory: 30
+      depends_on: ["optimize_angles"]
+
+    - id: "qpu_qaoa_p2"
+      name: "Execute QAOA p=2"
+      type: COMBINATORIAL_OPT
+      cost: 40.0
+      qubits: 20
+      depth: 20
+      memory: 0
+      depends_on: ["qaoa_circuit_p2"]
+
+    - id: "sample_p2"
+      name: "Sample QAOA p=2"
+      type: SAMPLING
+      cost: 25.0
+      qubits: 20
+      memory: 0
+      depends_on: ["qpu_qaoa_p2"]
+
+    - id: "final_decode"
+      name: "Final Solution Decode"
+      type: CLASSICAL_DATA_OP
+      cost: 3.0
+      memory: 40
+      depends_on: ["sample_p2"]
+
+    - id: "report"
+      name: "Generate Report"
+      type: CLASSICAL_DATA_OP
+      cost: 2.0
+      memory: 20
+      depends_on: ["final_decode", "evaluate_cuts"]

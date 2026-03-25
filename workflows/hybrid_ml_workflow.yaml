@@ -1,0 +1,126 @@
+workflow:
+  name: "Hybrid Quantum-Classical ML Pipeline"
+  tasks:
+    # Data preparation (classical)
+    - id: "load_dataset"
+      name: "Load Training Dataset"
+      type: CLASSICAL_DATA_OP
+      cost: 3.0
+      memory: 200
+
+    - id: "preprocess"
+      name: "Preprocess Features"
+      type: CLASSICAL_DATA_OP
+      cost: 5.0
+      memory: 150
+      depends_on: ["load_dataset"]
+
+    - id: "feature_matrix"
+      name: "Build Feature Matrix"
+      type: LINEAR_ALGEBRA
+      cost: 10.0
+      memory: 300
+      depends_on: ["preprocess"]
+
+    - id: "pca_reduce"
+      name: "PCA Dimensionality Reduction"
+      type: LINEAR_ALGEBRA
+      cost: 8.0
+      memory: 200
+      depends_on: ["feature_matrix"]
+
+    # Classical NN branch
+    - id: "classical_encoder"
+      name: "Classical NN Encoder"
+      type: NN_INFERENCE
+      cost: 20.0
+      memory: 500
+      depends_on: ["pca_reduce"]
+
+    # Quantum kernel branch
+    - id: "encode_quantum"
+      name: "Quantum Feature Encoding"
+      type: QUANTUM_CIRCUIT
+      cost: 15.0
+      qubits: 8
+      depth: 20
+      memory: 0
+      depends_on: ["pca_reduce"]
+
+    - id: "quantum_kernel"
+      name: "Quantum Kernel Estimation"
+      type: SAMPLING
+      cost: 30.0
+      qubits: 8
+      memory: 0
+      depends_on: ["encode_quantum"]
+
+    # Quantum optimization branch
+    - id: "vqc_circuit"
+      name: "Variational Quantum Classifier"
+      type: QUANTUM_CIRCUIT
+      cost: 25.0
+      qubits: 8
+      depth: 30
+      memory: 0
+      depends_on: ["pca_reduce"]
+
+    - id: "vqc_measure"
+      name: "VQC Measurement"
+      type: SAMPLING
+      cost: 20.0
+      qubits: 8
+      memory: 0
+      depends_on: ["vqc_circuit"]
+
+    # Combine branches
+    - id: "merge_features"
+      name: "Merge Classical+Quantum Features"
+      type: LINEAR_ALGEBRA
+      cost: 6.0
+      memory: 400
+      depends_on: ["classical_encoder", "quantum_kernel", "vqc_measure"]
+
+    # Training loop
+    - id: "train_classifier"
+      name: "Train Hybrid Classifier"
+      type: NN_INFERENCE
+      cost: 30.0
+      memory: 800
+      depends_on: ["merge_features"]
+
+    - id: "backprop_quantum"
+      name: "Quantum Parameter Gradient"
+      type: PARAMETER_OPT
+      cost: 15.0
+      memory: 100
+      depends_on: ["train_classifier"]
+
+    - id: "update_quantum_params"
+      name: "Update Quantum Circuit Params"
+      type: PARAMETER_OPT
+      cost: 5.0
+      memory: 20
+      depends_on: ["backprop_quantum"]
+
+    # Evaluation
+    - id: "validate"
+      name: "Validation Evaluation"
+      type: NN_INFERENCE
+      cost: 12.0
+      memory: 400
+      depends_on: ["update_quantum_params"]
+
+    - id: "compute_metrics"
+      name: "Compute Classification Metrics"
+      type: CLASSICAL_DATA_OP
+      cost: 2.0
+      memory: 30
+      depends_on: ["validate"]
+
+    - id: "generate_report"
+      name: "Generate Training Report"
+      type: CLASSICAL_DATA_OP
+      cost: 1.0
+      memory: 20
+      depends_on: ["compute_metrics"]

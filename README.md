@@ -106,19 +106,149 @@ The simulator generates three PNG files in the output directory:
 - **`task_graph.png`** — The workflow DAG with nodes colored by assigned device type and edge widths proportional to data transfer size.
 - **`dashboard.png`** — Four-panel summary: device utilization over time, task latency distribution, reallocation timeline, and a statistics table.
 
-## End-to-End Workflow
+## Simulation Phases
 
-1. **Parse** — `WorkflowParser` reads the YAML and builds a `TensorComputeGraph` (DAG of tasks and data edges)
-2. **Analyze** — `CostAnalyzer` computes total cost, per-type breakdowns, critical path length, and parallelism width
-3. **Build hardware** — `HardwareCluster.default_cluster()` creates 6 devices: 2 CPUs, 2 GPUs, 1 AI accelerator, 1 QPU
-4. **Simulate** — The `SimulationEngine` runs a discrete-event loop:
-   - Ready tasks (all predecessors complete) are dispatched to devices via `HardwareMapper`, prioritized by DAG urgency
-   - QPU tasks receive stochastic latency multipliers sampled from a normal distribution
-   - The clock advances to the next task completion; resources are released and successors become ready
-   - If feedback is enabled, every N ticks the `AdaptiveFeedbackLoop` checks for QPU stalls (>1.5x estimated time triggers GPU fallback) and device overload (>85% utilization triggers rebalancing)
-   - QPU calibration pauses occur periodically (every 50 ticks)
-5. **Report** — `MetricsCollector` prints makespan, average latency ratio, per-device stats, and reallocation count
-6. **Visualize** — Three PNG outputs are saved to the output directory
+The simulator executes in seven distinct phases, each handled by a dedicated module:
+
+### Phase 1: Workflow Parsing
+
+**Module:** `qcsc/parser/workflow_parser.py`
+
+The `WorkflowParser` reads a YAML workflow definition and converts it into an in-memory directed acyclic graph (DAG) called a `TensorComputeGraph`. This happens in two passes:
+
+- **Pass 1 — Build nodes:** Iterates over `workflow.tasks` in the YAML and creates a `TaskNode` for each entry. Each node captures the task's `id`, `name`, `type` (mapped from a string like `"QUANTUM_CIRCUIT"` to the `TaskType` enum), `compute_cost`, `memory_requirement`, and optional quantum-specific fields (`qubit_count`, `circuit_depth`, `tensor_shape`). Each node also receives a hardware affinity score for every device type from the `DEFAULT_AFFINITY` matrix in `config.py` — for example, a `QUANTUM_CIRCUIT` task gets 0.95 affinity for QPU and 0.6 for GPU.
+
+- **Pass 2 — Build edges:** Iterates again and processes `depends_on` lists. For each dependency, a `DataEdge` is created from the predecessor to the current task, carrying a `data_size` (in MB) that represents the volume of data flowing between them. These edges define the execution order constraints in the DAG.
+
+The result is a `TensorComputeGraph` backed by NetworkX, where nodes are tasks and edges are data dependencies.
+
+### Phase 2: Cost and Parallelism Analysis
+
+**Module:** `qcsc/parser/cost_analyzer.py`
+
+Before simulation begins, the `CostAnalyzer` inspects the DAG to produce two reports:
+
+- **Cost Report:** Sums up total compute cost across all tasks, broken down by task type (e.g., `QUANTUM_CIRCUIT: 60.0`, `LINEAR_ALGEBRA: 30.0`) and by weighted device affinity load (how much work each device type would handle if tasks were assigned by affinity alone). Also counts the number of classical vs. quantum tasks.
+
+- **Parallelism Report:** Analyzes the DAG structure to determine:
+  - **Critical path length** — the longest chain of dependent tasks from source to sink, which sets the theoretical minimum makespan
+  - **Critical path nodes** — which specific tasks form this bottleneck chain
+  - **Max parallelism width** — the maximum number of tasks that can execute concurrently (the largest antichain in the DAG)
+  - **Parallelism ratio** — total cost divided by critical path length; a ratio of 3.0 means the workflow has roughly 3x the work that can be parallelized vs. the serial bottleneck
+
+These reports are printed to stdout and provide a pre-simulation understanding of the workflow's structure and potential bottlenecks.
+
+### Phase 3: Hardware Cluster Construction
+
+**Module:** `qcsc/hardware/cluster.py`, `qcsc/hardware/device.py`
+
+`HardwareCluster.default_cluster()` creates a heterogeneous set of 6 devices with realistic properties:
+
+| Device | Count | Capacity | Speed | Memory | Special Properties |
+|---|---|---|---|---|---|
+| **CPU** | 2 | 8 concurrent tasks | 1.0x | 16 GB | 16 cores |
+| **GPU** | 2 | 4 concurrent tasks | 5.0x | 40 GB | 100 TFLOPS |
+| **AI Accelerator** | 1 | 4 concurrent tasks | 8.0x | 32 GB | 275 TOPS |
+| **QPU** | 1 | 1 task (serial) | 3.0x | N/A | 127 qubits, coherence time, gate fidelity, latency variance, calibration every 50 ticks |
+
+Each device tracks its own `current_load`, `utilization`, and `memory_available`. The `can_accept()` method checks both capacity and memory before allowing a task to be assigned. The QPU is notably limited to one task at a time and requires periodic calibration pauses.
+
+### Phase 4: Task Scheduling and Dispatch
+
+**Modules:** `qcsc/scheduler/scheduler.py`, `qcsc/hardware/mapper.py`
+
+The `DynamicScheduler` and `HardwareMapper` work together to assign ready tasks to devices:
+
+1. **Identify ready tasks:** The `TensorComputeGraph.get_ready_tasks()` method finds all `PENDING` tasks whose predecessors are all `COMPLETED`.
+
+2. **Sort by urgency:** Ready tasks are sorted by their **node urgency** — the longest remaining path from the task to any sink in the DAG. Tasks on the critical path get dispatched first, which minimizes overall makespan.
+
+3. **Score task-device pairs:** For each ready task, the `HardwareMapper` evaluates every available device using a weighted scoring function:
+   ```
+   score = 0.4 * affinity + 0.25 * availability + 0.2 * transfer_fit + 0.15 * memory_fit
+   ```
+   - **Affinity** (0.4): How well-suited this device type is for this task type (from the affinity matrix)
+   - **Availability** (0.25): Inverse of current device utilization — prefers less-loaded devices
+   - **Transfer fit** (0.2): Data transfer cost between devices
+   - **Memory fit** (0.15): Whether the device has enough free memory for the task
+
+4. **Dispatch:** The task is assigned to the highest-scoring device. The device's load and memory are updated, the task status changes to `RUNNING`, and a `ScheduledTask` record is created with the estimated end time (`start_time + compute_cost / device.speed_factor`).
+
+5. **QPU stochastic latency:** If the assigned device is a QPU, a latency multiplier is sampled from a normal distribution `N(1.0, variance)` (clamped to a minimum of 0.5x). This models the inherent unpredictability of quantum hardware — the actual end time may differ significantly from the estimate.
+
+### Phase 5: Discrete-Event Simulation Loop
+
+**Module:** `qcsc/simulation/engine.py`
+
+The `SimulationEngine` drives the main simulation loop. Rather than simulating every time unit, it jumps directly to the next meaningful event:
+
+1. **Initial dispatch:** All tasks with no dependencies are scheduled immediately at tick 0.
+
+2. **Advance clock:** The clock jumps to the earliest `actual_end_time` among all running tasks.
+
+3. **Record device snapshots:** At each tick, the utilization of every device is recorded for later visualization.
+
+4. **Process completions:** All tasks finishing at the current tick are marked `COMPLETED`. Their devices are released (load decremented, memory freed). The scheduler then checks each completed task's successors — if all of a successor's predecessors are now complete, that successor becomes ready for dispatch.
+
+5. **QPU calibration:** Every 50 ticks, the QPU undergoes a calibration cycle. During calibration, the QPU is temporarily unavailable, modeling real quantum hardware maintenance.
+
+6. **Feedback check** (if enabled): The adaptive feedback loop runs at configurable intervals — see Phase 6.
+
+7. **Schedule new tasks:** Any newly-ready tasks are dispatched using the same mapping and scoring process from Phase 4.
+
+8. **Repeat** until all tasks are `COMPLETED` or a safety limit of 10,000 iterations is reached. The loop also detects deadlocks — if no tasks are running but some remain pending, it warns and exits.
+
+### Phase 6: Adaptive Feedback and Reallocation
+
+**Module:** `qcsc/scheduler/feedback.py`
+
+When enabled (`--feedback` flag), the `AdaptiveFeedbackLoop` periodically inspects the system state and makes dynamic reallocation decisions. It runs every N ticks (configurable via `feedback_interval`, default 5) and applies two strategies:
+
+**Strategy 1 — QPU Latency Fallback:**
+- For each task currently running on the QPU, the feedback loop compares elapsed time to estimated time
+- If `elapsed / expected > 1.5` (the `latency_variance_threshold`), the task is considered stalled
+- The loop finds the least-loaded GPU as a fallback (state-vector simulation can approximate quantum circuit execution classically)
+- If a GPU has capacity and memory, the task is cancelled on the QPU and restarted on the GPU
+
+**Strategy 2 — Load Balancing:**
+- Calculates average utilization per device type
+- Identifies **overloaded** types (>85% utilization) and **underloaded** types (<50% utilization)
+- For tasks running on overloaded devices, checks if any underloaded device type has at least 0.3 affinity for that task
+- If so, migrates the task to the least-loaded device of the underloaded type
+
+**Reallocation constraints** prevent thrashing:
+- Each task can be reallocated at most 2 times (`max_reallocations_per_task`)
+- A cooldown of 10 ticks must pass between reallocations of the same task (`reallocation_cooldown`)
+
+When a task is reallocated, it loses all progress — it restarts from scratch on the new device. The `MetricsCollector` records every reallocation event with its reason, source device, and target device.
+
+### Phase 7: Metrics Collection and Visualization
+
+**Modules:** `qcsc/scheduler/metrics.py`, `qcsc/visualization/`
+
+Throughout the simulation, the `MetricsCollector` records data at every event:
+- **Per-task metrics:** device assignment, estimated vs. actual execution time, start/end ticks, reallocation count
+- **Device snapshots:** utilization and task load at each tick
+- **Reallocation events:** which task moved, from/to devices, reason, and timestamp
+
+After simulation completes, a summary is printed:
+- **Makespan** — total simulation time from first dispatch to last completion
+- **Average task latency** — mean execution time across all tasks
+- **Average latency ratio** — actual time / estimated time (>1.0 means tasks took longer than expected on average)
+- **Reallocation count** — how many times tasks were moved between devices
+- **Per-device-type breakdown** — task count, average time, and total time for CPU, GPU, AI accelerator, and QPU
+
+Three visualizations are then generated:
+
+- **Gantt Chart** (`gantt_chart.png`): Horizontal bars showing each task's execution span on its assigned device. Tasks are colored by type (7 colors). Reallocated tasks have red borders and thicker outlines. Red arrows connect the old and new device positions to show migration paths.
+
+- **DAG Graph** (`task_graph.png`): The workflow DAG rendered with a hierarchical layered layout (topological generations). Nodes are colored by their final assigned device type (green=CPU, blue=GPU, orange=AI accelerator, purple=QPU, gray=unassigned). Edge widths are proportional to data transfer size between tasks.
+
+- **Dashboard** (`dashboard.png`): A 2x2 multi-panel figure combining:
+  1. **Device utilization over time** — line plot showing how busy each device type was throughout the simulation
+  2. **Task latency distribution** — box plot comparing execution time spreads across device types
+  3. **Reallocation timeline** — scatter plot of reallocation events with annotations showing the from/to device migration
+  4. **Summary statistics table** — makespan, task counts, average latency, reallocation count, and per-device-type breakdowns
 
 ## What You Will Learn
 
