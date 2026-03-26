@@ -47,6 +47,31 @@ class HardwareMapper:
 
         return score
 
+    def score_breakdown(self, task: TaskNode, device: Device) -> dict:
+        """Return individual score components for learning display."""
+        affinity = task.hardware_affinity.get(device.device_type, 0.0)
+        availability = 1.0 - device.utilization
+        transfer_score = 1.0
+        if device.device_type == DeviceType.QPU:
+            memory_fit = 1.0
+        elif device.memory_total > 0:
+            memory_fit = min(1.0, device.memory_available / max(task.memory_requirement, 0.1))
+        else:
+            memory_fit = 0.0
+        total = (
+            self.config.affinity_weight * affinity
+            + self.config.load_weight * availability
+            + self.config.transfer_weight * transfer_score
+            + self.config.memory_weight * memory_fit
+        )
+        return {
+            "affinity": round(affinity, 3),
+            "availability": round(availability, 3),
+            "transfer": round(transfer_score, 3),
+            "memory": round(memory_fit, 3),
+            "total": round(total, 3),
+        }
+
     def map_task(self, task: TaskNode, tcg: TensorComputeGraph) -> Optional[Device]:
         """Find the best device for a given task."""
         best_device = None
