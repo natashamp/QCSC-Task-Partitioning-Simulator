@@ -106,6 +106,35 @@ The simulator generates three PNG files in the output directory:
 - **`task_graph.png`** — The workflow DAG with nodes colored by assigned device type and edge widths proportional to data transfer size.
 - **`dashboard.png`** — Four-panel summary: device utilization over time, task latency distribution, reallocation timeline, and a statistics table.
 
+### Interactive Learning App (Streamlit)
+
+An interactive web-based learning tool that walks you through the simulation one event at a time with plain-English explanations of every scheduling decision.
+
+```bash
+python3 -m streamlit run streamlit_app/app.py
+```
+
+This opens a browser at `http://localhost:8501` with:
+
+- **Step-by-step controls** — press "Next Step" to advance one event at a time, or use "Auto-Play" in Guided mode to watch the simulation unfold automatically
+- **Live DAG view** — the workflow graph updates in real time as tasks transition from pending (gray) to running (orange) to completed (green)
+- **Device panel** — utilization bars and current task assignments for each device (CPU, GPU, AI Accelerator, QPU)
+- **Incremental Gantt chart** — the execution timeline builds bar-by-bar as tasks dispatch and complete
+- **Event narration** — each event gets a plain-English explanation of what happened and why the scheduler made that decision
+- **Score breakdown** — when a task is dispatched, a table and bar chart show how every device scored on affinity, availability, transfer cost, and memory fit
+- **Concept panels** — educational explanations appear automatically when new concepts become relevant (DAG dependencies, parallelism, affinity scoring, quantum noise, feedback loops, makespan)
+
+#### Sidebar Controls
+
+| Control | Description |
+|---|---|
+| **Workflow** | Select from VQE, QAOA, or Hybrid ML workflows |
+| **Adaptive Feedback Loop** | Toggle the feedback system on/off |
+| **QPU Latency Variance** | Slider from 0.0 (deterministic) to 1.0 (high noise) |
+| **Random Seed** | Set seed for reproducible runs |
+| **Mode** | Interactive (manual stepping) or Guided (auto-play with configurable speed) |
+| **Reset Simulation** | Restart from the beginning with current settings |
+
 ## Simulation Phases
 
 The simulator executes in seven distinct phases, each handled by a dedicated module:
